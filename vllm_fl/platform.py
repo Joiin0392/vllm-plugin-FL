@@ -100,6 +100,8 @@ class PlatformFL(Platform):
             return False
         if self.vendor_name == "gcu":
             return True
+        if self.device_type == "npu":
+            return True
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
@@ -199,6 +201,11 @@ class PlatformFL(Platform):
 
         parallel_config.worker_cls = "vllm_fl.worker.worker.WorkerFL"
 
+        # Apply spec decode patch (deferred from register() to avoid
+        # circular import during platform resolution).
+        from vllm_fl import _apply_spec_decode_patch
+        _apply_spec_decode_patch()
+
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             # Ascend NPU requires block_size to be a multiple of 128
@@ -243,6 +250,12 @@ class PlatformFL(Platform):
         # Disable torch.compile and CUDAGraphs until torch_npu inductor
         # is stable. check_and_update_config runs after VllmConfig.__init__
         # processes enforce_eager, so we must set compilation_config directly.
+        #
+        # NOTE: Graph mode (ACL Graph via vllm-ascend AscendCompiler) was
+        # tested but fails because FL's model_runner.graph_capture calls
+        # torch.cuda.current_stream() which is unavailable in torch+cpu.
+        # Enabling graph mode requires patching FL's model_runner to use
+        # torch.npu.current_stream() instead. Tracked as future work.
         if cls.device_type == "npu":
             from vllm.config import CompilationMode
             if compilation_config.mode != CompilationMode.NONE:
@@ -393,6 +406,10 @@ class PlatformFL(Platform):
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm_fl.compilation.graph.GraphWrapper"
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        return cls.simple_compile_backend
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:

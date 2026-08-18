@@ -94,11 +94,89 @@ def _patch_custom_ops():
     register_op_schemas()
 
 
+def _patch_spec_decode():
+    """Replace Triton eagle_prepare_next_token_padded_kernel with PyTorch ops.
+
+    The upstream Triton kernel uses tl.sum() which returns int1 (bool) on
+    triton-ascend, causing a type mismatch with the uint32 then-block.
+    vllm-ascend solves this by overriding prepare_next_token_ids_padded
+    in AscendSpecDecodeBaseProposer. We do the same here so FL does not
+    need to modify vllm source code.
+
+    This function only defines the replacement; the actual monkey-patch
+    is applied lazily in PlatformFL.check_and_update_config to avoid
+    circular imports during platform resolution.
+    """
+    pass
+
+
+_fl_spec_decode_patched = False
+
+def _apply_spec_decode_patch():
+    global _fl_spec_decode_patched
+    if _fl_spec_decode_patched:
+        return
+    import numpy as np
+    import torch
+    from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+
+    def _prepare_next_token_ids_padded(
+        self,
+        sampled_token_ids: torch.Tensor,
+        requests,
+        gpu_input_batch,
+        discard_request_mask: torch.Tensor,
+    ):
+        num_reqs = gpu_input_batch.num_reqs
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        self.backup_next_token_ids.np[:num_reqs] = np.array(
+            [
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
+                for i in range(num_reqs)
+            ],
+            dtype=np.int32,
+        )
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu
+
+        batch_size, num_tokens = sampled_token_ids.shape
+        device = sampled_token_ids.device
+
+        valid_sampled_token_ids = sampled_token_ids.clone()
+        valid_sampled_token_ids[discard_request_mask[:batch_size]] = -1
+
+        valid_mask = (valid_sampled_token_ids != -1) & (
+            valid_sampled_token_ids < gpu_input_batch.vocab_size
+        )
+        valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
+
+        last_valid_indices = valid_sampled_tokens_count - 1
+        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
+
+        selected_tokens = torch.gather(
+            valid_sampled_token_ids, 1, last_valid_indices_safe.unsqueeze(1)
+        ).squeeze(1)
+
+        next_token_ids = torch.where(
+            last_valid_indices != -1,
+            selected_tokens,
+            backup_tokens_gpu[:batch_size],
+        ).to(torch.int32)
+
+        return next_token_ids, valid_sampled_tokens_count
+
+    SpecDecodeBaseProposer.prepare_next_token_ids_padded = (
+        _prepare_next_token_ids_padded
+    )
+    _fl_spec_decode_patched = True
+
+
 def register():
     """Register the FL platform."""
     _patch_custom_ops()
     _patch_flash_attn_import()
     _patch_transformers_compat()
+    _patch_spec_decode()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform

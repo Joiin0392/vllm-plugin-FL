@@ -234,6 +234,8 @@ class AscendAttentionMetadataBuilder:
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
@@ -250,6 +252,13 @@ class AscendAttentionMetadataBuilder:
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+
+    def build_for_drafting(self, common_attn_metadata, draft_index=0):
+        """Build attention metadata for draft model (spec decode)."""
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
     def _get_mask_builder(self) -> AttentionMaskBuilder:
         """Get or create the attention mask builder (cached at class level)."""

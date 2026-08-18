@@ -608,6 +608,11 @@ class WorkerFL(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # Apply spec decode patch in worker process (spawn doesn't inherit
+        # monkey-patches from the parent process).
+        from vllm_fl import _apply_spec_decode_patch
+        _apply_spec_decode_patch()
+
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
